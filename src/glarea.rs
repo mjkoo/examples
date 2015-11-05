@@ -2,6 +2,10 @@
 //!
 //! This sample demonstrates how to use GLAreas and OpenGL
 
+#[cfg(feature = "opengl")]
+#[macro_use]
+extern crate glium;
+
 // make moving clones into closures more convenient
 macro_rules! clone {
     ($($n:ident),+; || $body:block) => (
@@ -22,7 +26,6 @@ macro_rules! clone {
 mod example {
     extern crate gtk;
     extern crate libc;
-    extern crate glium;
     extern crate epoxy;
     extern crate shared_library;
 
@@ -34,7 +37,8 @@ mod example {
     use self::gtk::signal::Inhibit;
     use self::gtk::{GLArea, Window};
 
-    use self::glium::Surface;
+    use glium;
+    use glium::Surface;
 
     use self::shared_library::dynamic_library::DynamicLibrary;
 
@@ -91,20 +95,89 @@ mod example {
             }
         }
 
-        let context: Rc<RefCell<Option<Rc<glium::backend::Context>>>> = Rc::new(RefCell::new(None));
-        glarea.connect_realize(clone!(glarea, context; |_widget| {
-            let mut context = context.borrow_mut();
-            *context = Some(unsafe {
-                glium::backend::Context::new::<_, ()>(Backend { glarea: glarea.clone() },
-                    true, Default::default())
-            }.unwrap());
+        struct Facade {
+            context: Rc<glium::backend::Context>,
+        }
+
+        impl glium::backend::Facade for Facade {
+            fn get_context(&self) -> &Rc<glium::backend::Context> {
+                &self.context
+            }
+        }
+
+        impl Facade {
+            fn draw(&self) -> glium::Frame {
+                glium::Frame::new(self.context.clone(), self.context.get_framebuffer_dimensions())
+            }
+        }
+
+        let display: Rc<RefCell<Option<Facade>>> = Rc::new(RefCell::new(None));
+        glarea.connect_realize(clone!(glarea, display; |_widget| {
+            let mut display = display.borrow_mut();
+            *display = Some(
+                Facade {
+                    context: unsafe {
+                        glium::backend::Context::new::<_, ()>(
+                            Backend {
+                                glarea: glarea.clone(),
+                            }, true, Default::default())
+                    }.unwrap(),
+                }
+            );
         }));
 
-        glarea.connect_render(clone!(context; |_glarea, _glctx| {
-            let context = context.borrow();
-            let mut target = glium::Frame::new(context.as_ref().unwrap().clone(),
-                context.as_ref().unwrap().get_framebuffer_dimensions());
-            target.clear_color(1.0, 0.0, 0.0, 1.0);
+        glarea.connect_render(clone!(display; |_glarea, _glctx| {
+            let display = display.borrow();
+            let display = display.as_ref().unwrap();
+
+            // TODO: Move this into realize
+            #[derive(Copy, Clone)]
+            struct Vertex {
+                position: [f32; 2],
+                color: [f32; 3]
+            }
+
+            implement_vertex!(Vertex, position, color);
+
+            let vertices = vec![
+                Vertex{ position: [0.0, 0.5], color: [1.0, 0.0, 0.0] },
+                Vertex{ position: [0.5, -0.5], color: [0.0, 1.0, 0.0] },
+                Vertex{ position: [-0.5, -0.5], color: [0.0, 0.0, 1.0] },
+            ];
+
+            let vertex_buffer = glium::VertexBuffer::new(display, &vertices).unwrap();
+            let indices = glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList);
+
+            let vert_shader_src = r#"
+                #version 140
+
+                in vec2 position;
+                in vec3 color;
+
+                out vec3 vertex_color;
+
+                void main() {
+                    vertex_color = color;
+                    gl_Position = vec4(position, 0.0, 1.0);
+                }"#;
+
+            let frag_shader_src = r#"
+                #version 140
+
+                in vec3 vertex_color;
+
+                out vec4 color;
+
+                void main() {
+                    color = vec4(vertex_color, 1.0);
+                }"#;
+
+            let program = glium::Program::from_source(display, vert_shader_src, frag_shader_src, None).unwrap();
+
+            let mut target = display.draw();
+            target.clear_color(0.3, 0.3, 0.3, 1.0);
+            target.draw(&vertex_buffer, &indices, &program, &glium::uniforms::EmptyUniforms,
+                        &Default::default()).unwrap();
             target.finish().unwrap();
 
             Inhibit(false)
