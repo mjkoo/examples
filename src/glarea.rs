@@ -71,7 +71,6 @@ mod example {
 
         unsafe impl glium::backend::Backend for Backend {
             fn swap_buffers(&self) -> Result<(), glium::SwapBuffersError> {
-                self.glarea.queue_render();
                 Ok(())
             }
 
@@ -111,33 +110,34 @@ mod example {
             }
         }
 
-        let display: Rc<RefCell<Option<Facade>>> = Rc::new(RefCell::new(None));
-        glarea.connect_realize(clone!(glarea, display; |_widget| {
-            let mut display = display.borrow_mut();
-            *display = Some(
-                Facade {
-                    context: unsafe {
-                        glium::backend::Context::new::<_, ()>(
-                            Backend {
-                                glarea: glarea.clone(),
-                            }, true, Default::default())
-                    }.unwrap(),
-                }
-            );
-        }));
+        #[derive(Copy, Clone)]
+        struct Vertex {
+            position: [f32; 2],
+            color: [f32; 3]
+        }
 
-        glarea.connect_render(clone!(display; |_glarea, _glctx| {
-            let display = display.borrow();
-            let display = display.as_ref().unwrap();
+        implement_vertex!(Vertex, position, color);
 
-            // TODO: Move this into realize
-            #[derive(Copy, Clone)]
-            struct Vertex {
-                position: [f32; 2],
-                color: [f32; 3]
-            }
+        struct State {
+            display: Facade,
+            vertex_buffer: glium::VertexBuffer<Vertex>,
+            indices: glium::index::NoIndices,
+            program: glium::program::Program,
+        }
 
-            implement_vertex!(Vertex, position, color);
+        let state: Rc<RefCell<Option<State>>> = Rc::new(RefCell::new(None));
+
+        glarea.connect_realize(clone!(glarea, state; |_widget| {
+            let mut state = state.borrow_mut();
+
+            let display = Facade {
+                context: unsafe {
+                    glium::backend::Context::new::<_, ()>(
+                        Backend {
+                            glarea: glarea.clone(),
+                        }, true, Default::default())
+                }.unwrap(),
+            };
 
             let vertices = vec![
                 Vertex{ position: [0.0, 0.5], color: [1.0, 0.0, 0.0] },
@@ -145,7 +145,7 @@ mod example {
                 Vertex{ position: [-0.5, -0.5], color: [0.0, 0.0, 1.0] },
             ];
 
-            let vertex_buffer = glium::VertexBuffer::new(display, &vertices).unwrap();
+            let vertex_buffer = glium::VertexBuffer::new(&display, &vertices).unwrap();
             let indices = glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList);
 
             let vert_shader_src = r#"
@@ -172,12 +172,30 @@ mod example {
                     color = vec4(vertex_color, 1.0);
                 }"#;
 
-            let program = glium::Program::from_source(display, vert_shader_src, frag_shader_src, None).unwrap();
+            let program = glium::Program::from_source(&display, vert_shader_src,
+                                                      frag_shader_src, None).unwrap();
 
-            let mut target = display.draw();
+            *state = Some(State {
+                display: display,
+                vertex_buffer: vertex_buffer,
+                indices: indices,
+                program: program,
+            });
+        }));
+
+        glarea.connect_unrealize(clone!(state; |_widget| {
+            let mut state = state.borrow_mut();
+            *state = None;
+        }));
+
+        glarea.connect_render(clone!(state; |_glarea, _glctx| {
+            let state = state.borrow();
+            let state = state.as_ref().unwrap();
+
+            let mut target = state.display.draw();
             target.clear_color(0.3, 0.3, 0.3, 1.0);
-            target.draw(&vertex_buffer, &indices, &program, &glium::uniforms::EmptyUniforms,
-                        &Default::default()).unwrap();
+            target.draw(&state.vertex_buffer, &state.indices, &state.program,
+                        &glium::uniforms::EmptyUniforms, &Default::default()).unwrap();
             target.finish().unwrap();
 
             Inhibit(false)
